@@ -3,267 +3,238 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Three.js Stable Fluids + Gravity</title>
+    <title>Device Orientation Fluid Simulation</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        #permission-btn {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            padding: 15px 30px; font-size: 18px; z-index: 10;
+        body { margin: 0; overflow: hidden; background-color: #111; touch-action: none; }
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); display: flex;
+            justify-content: center; align-items: center; z-index: 10;
+        }
+        #startButton {
+            padding: 15px 30px; font-size: 18px; border: none; border-radius: 8px;
+            background-color: #007bff; color: white; cursor: pointer; font-weight: bold;
         }
     </style>
 </head>
 <body>
-    <button id="permission-btn">センサーへのアクセスを許可して開始</button>
+    <div id="overlay">
+        <button id="startButton">シミュレーション開始</button>
+    </div>
 
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer;
+        let instancedMesh;
+        
+        // シミュレーション設定
+        const PARTICLE_COUNT = 3000;
+        const PARTICLE_SIZE = 0.05;
+        const positions = new Float32Array(PARTICLE_COUNT * 2); // x, yのみ (2D)
+        const velocities = new Float32Array(PARTICLE_COUNT * 2);
+        
+        // 重力ベクトル (初期値は下向き)
+        let gravityX = 0;
+        let gravityY = -9.8;
+        
+        // 画面の境界 (OrthographicCameraの範囲)
+        let bounds = { left: -5, right: 5, bottom: -5, top: 5 };
+
+        init();
+        animate();
+
+        function init() {
+            // 1. シーンとカメラのセットアップ (2DシミュレーションのためOrthographicCameraを使用)
+            scene = new THREE.Scene();
+            const aspect = window.innerWidth / window.innerHeight;
+            const frustumSize = 10;
+            camera = new THREE.OrthographicCamera(
+                frustumSize * aspect / - 2, frustumSize * aspect / 2,
+                frustumSize / 2, frustumSize / - 2,
+                0.1, 100
+            );
+            camera.position.z = 10;
+            
+            updateBounds();
+
+            // 2. レンダラーのセットアップ
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // 3. パーティクルの生成 (InstancedMeshで描画負荷を下げる)
+            const geometry = new THREE.CircleGeometry(PARTICLE_SIZE, 16);
+            const material = new THREE.MeshBasicMaterial({ 
+                color: 0x00aaff, 
+                transparent: true, 
+                opacity: 0.8 
+            });
+            instancedMesh = new THREE.InstancedMesh(geometry, material, PARTICLE_COUNT);
+            
+            const dummy = new THREE.Object3D();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                // 初期位置をランダムに配置
+                positions[i * 2] = (Math.random() - 0.5) * (bounds.right - bounds.left) * 0.8;
+                positions[i * 2 + 1] = (Math.random() - 0.5) * (bounds.top - bounds.bottom) * 0.8;
+                
+                // 初速度はゼロ
+                velocities[i * 2] = 0;
+                velocities[i * 2 + 1] = 0;
+
+                dummy.position.set(positions[i * 2], positions[i * 2 + 1], 0);
+                dummy.updateMatrix();
+                instancedMesh.setMatrixAt(i, dummy.matrix);
             }
-        }
-    </script>
+            scene.add(instancedMesh);
 
-    <script type="module">
-        import * as THREE from 'three';
-
-        // --- 1. 基本セットアップ ---
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        const renderer = new THREE.WebGLRenderer({ antialias: false });
-        renderer.setSize(width, height);
-        document.body.appendChild(renderer.domElement);
-
-        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        const scene = new THREE.Scene();
-        const geometry = new THREE.PlaneGeometry(2, 2);
-
-        // --- 2. GPGPU用レンダーターゲット (Ping-Pong) ---
-        // RGBAFloatを使用して精度を確保 (モバイル対応ならHalfFloatTypeを推奨)
-        const simRes = 256; // シミュレーション解像度
-        const options = {
-            width: simRes, height: simRes,
-            minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
-            format: THREE.RGBAFormat, type: THREE.HalfFloatType,
-            depthBuffer: false, stencilBuffer: false
-        };
-        let rtRead = new THREE.WebGLRenderTarget(simRes, simRes, options);
-        let rtWrite = new THREE.WebGLRenderTarget(simRes, simRes, options);
-
-        function swapTargets() {
-            const temp = rtRead;
-            rtRead = rtWrite;
-            rtWrite = temp;
-        }
-
-        // --- 3. 共通のシェーダーUniforms ---
-        const texelSize = new THREE.Vector2(1.0 / simRes, 1.0 / simRes);
-        const dt = 0.016; // タイムステップ
-
-        // --- 4. GLSL シェーダー群 ---
-        const vertexShader = `
-            varying vec2 vUv;
-            void main() {
-                vUv = uv;
-                gl_Position = vec4(position, 1.0);
-            }
-        `;
-
-        // 4.1 移流・外力・発散・圧力計算をまとめたシミュレーションマテリアル構築関数
-        function createMaterial(fragmentShaderCode, uniforms) {
-            return new THREE.ShaderMaterial({
-                vertexShader,
-                fragmentShader: fragmentShaderCode,
-                uniforms: uniforms,
-                depthWrite: false, depthTest: false
+            // 4. イベントリスナーの設定
+            window.addEventListener('resize', onWindowResize);
+            
+            const startButton = document.getElementById('startButton');
+            startButton.addEventListener('click', () => {
+                requestDeviceOrientation();
             });
         }
 
-        // 外力 (重力) の適用
-        const forceMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            uniform vec2 uGravity;
-            uniform float uDt;
-            void main() {
-                vec4 data = texture2D(uTex, vUv);
-                vec2 vel = data.rg;
-                // 重力を速度に加算
-                vel += uGravity * uDt * 500.0; 
-                // 減衰
-                vel *= 0.99;
-                gl_FragColor = vec4(vel, data.b, data.a);
-            }
-        `, { uTex: { value: null }, uGravity: { value: new THREE.Vector2(0, 0) }, uDt: { value: dt } });
-
-        // 移流 (Advection)
-        const advectionMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            uniform vec2 uTexelSize;
-            uniform float uDt;
-            void main() {
-                vec4 data = texture2D(uTex, vUv);
-                vec2 vel = data.rg;
-                vec2 pastUv = vUv - vel * uTexelSize * uDt * 100.0;
-                vec4 pastData = texture2D(uTex, pastUv);
-                // 速度のみ移流させる (R, G更新)
-                gl_FragColor = vec4(pastData.rg, data.b, data.a);
-            }
-        `, { uTex: { value: null }, uTexelSize: { value: texelSize }, uDt: { value: dt } });
-
-        // 発散 (Divergence)
-        const divergenceMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            uniform vec2 uTexelSize;
-            void main() {
-                float L = texture2D(uTex, vUv - vec2(uTexelSize.x, 0)).r;
-                float R = texture2D(uTex, vUv + vec2(uTexelSize.x, 0)).r;
-                float B = texture2D(uTex, vUv - vec2(0, uTexelSize.y)).g;
-                float T = texture2D(uTex, vUv + vec2(0, uTexelSize.y)).g;
-                vec4 data = texture2D(uTex, vUv);
-                float div = 0.5 * ((R - L) + (T - B));
-                // Aチャンネル(発散)のみ更新、他は維持
-                gl_FragColor = vec4(data.rg, data.b, div);
-            }
-        `, { uTex: { value: null }, uTexelSize: { value: texelSize } });
-
-        // 圧力 (Jacobi法)
-        const jacobiMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            uniform vec2 uTexelSize;
-            void main() {
-                float L = texture2D(uTex, vUv - vec2(uTexelSize.x, 0)).b;
-                float R = texture2D(uTex, vUv + vec2(uTexelSize.x, 0)).b;
-                float B = texture2D(uTex, vUv - vec2(0, uTexelSize.y)).b;
-                float T = texture2D(uTex, vUv + vec2(0, uTexelSize.y)).b;
-                vec4 data = texture2D(uTex, vUv);
-                float div = data.a;
-                float p = (L + R + B + T - div) * 0.25;
-                // Bチャンネル(圧力)のみ更新
-                gl_FragColor = vec4(data.rg, p, data.a);
-            }
-        `, { uTex: { value: null }, uTexelSize: { value: texelSize } });
-
-        // 勾配減算 (Gradient Subtraction)
-        const gradientMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            uniform vec2 uTexelSize;
-            void main() {
-                float L = texture2D(uTex, vUv - vec2(uTexelSize.x, 0)).b;
-                float R = texture2D(uTex, vUv + vec2(uTexelSize.x, 0)).b;
-                float B = texture2D(uTex, vUv - vec2(0, uTexelSize.y)).b;
-                float T = texture2D(uTex, vUv + vec2(0, uTexelSize.y)).b;
-                vec4 data = texture2D(uTex, vUv);
-                vec2 vel = data.rg;
-                vel.x -= 0.5 * (R - L);
-                vel.y -= 0.5 * (T - B);
-                // 最終的な速度を適用
-                gl_FragColor = vec4(vel, data.b, data.a);
-            }
-        `, { uTex: { value: null }, uTexelSize: { value: texelSize } });
-
-        // 画面描画用 (速度場を色で可視化)
-        const displayMat = createMaterial(`
-            varying vec2 vUv;
-            uniform sampler2D uTex;
-            void main() {
-                vec4 data = texture2D(uTex, vUv);
-                vec2 vel = data.rg;
-                // 速度のXYをRGに割り当て、視覚化
-                float r = vel.x * 0.5 + 0.5;
-                float g = vel.y * 0.5 + 0.5;
-                float b = length(vel);
-                gl_FragColor = vec4(r, g, b, 1.0);
-            }
-        `, { uTex: { value: null } });
-
-        const mesh = new THREE.Mesh(geometry, displayMat);
-        scene.add(mesh);
-
-        // シミュレーションステップの実行ヘルパー
-        function compute(material) {
-            mesh.material = material;
-            material.uniforms.uTex.value = rtRead.texture;
-            renderer.setRenderTarget(rtWrite);
-            renderer.render(scene, camera);
-            swapTargets();
-        }
-
-        // --- 5. センサー入力 (DeviceOrientation) ---
-        let gravityX = 0, gravityY = -1; // 初期値は下方向
-        
-        function handleOrientation(event) {
-            // beta: X軸回転 (-180 to 180), gamma: Y軸回転 (-90 to 90)
-            if (event.beta !== null && event.gamma !== null) {
-                // 画面の向き(Portrait/Landscape)に応じてXYを調整する必要がありますが、
-                // ここでは単純なPortraitを想定しています。
-                gravityX = event.gamma / 90.0;
-                gravityY = -event.beta / 90.0;
-                
-                // クランプ
-                gravityX = Math.max(-1, Math.min(1, gravityX));
-                gravityY = Math.max(-1, Math.min(1, gravityY));
-            }
-        }
-
-        const btn = document.getElementById('permission-btn');
-        btn.addEventListener('click', async () => {
+        // ジャイロセンサーの許可と初期化
+        function requestDeviceOrientation() {
             if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                try {
-                    const permission = await DeviceOrientationEvent.requestPermission();
-                    if (permission === 'granted') {
-                        window.addEventListener('deviceorientation', handleOrientation);
-                        btn.style.display = 'none';
-                    } else {
-                        alert('センサーへのアクセスが拒否されました。');
-                    }
-                } catch (e) {
-                    console.error(e);
-                }
+                // iOS 13+ の場合
+                DeviceOrientationEvent.requestPermission()
+                    .then(permissionState => {
+                        if (permissionState === 'granted') {
+                            window.addEventListener('deviceorientation', handleOrientation);
+                            hideOverlay();
+                        } else {
+                            alert("センサーのアクセスが拒否されました。");
+                        }
+                    })
+                    .catch(console.error);
             } else {
-                // Androidや古いiOSなどはそのまま追加可能
+                // Android や 古いiOSの場合
                 window.addEventListener('deviceorientation', handleOrientation);
-                btn.style.display = 'none';
+                hideOverlay();
             }
-        });
+        }
 
-        // --- 6. アニメーションループ ---
+        function hideOverlay() {
+            document.getElementById('overlay').style.display = 'none';
+        }
+
+        // 端末の向きから重力ベクトルを計算
+        function handleOrientation(event) {
+            let beta = event.beta;   // X軸の回転 (手前/奥への傾き) [-180, 180]
+            let gamma = event.gamma; // Y軸の回転 (左右への傾き) [-90, 90]
+
+            // 画面の向き（縦持ち・横持ち）を考慮
+            let orientation = window.screen.orientation ? window.screen.orientation.angle : window.orientation || 0;
+
+            let vecX = 0;
+            let vecY = 0;
+
+            if (orientation === 0) { // 縦持ち
+                vecX = gamma;
+                vecY = beta;
+            } else if (orientation === 90) { // 横持ち (左回転)
+                vecX = beta;
+                vecY = -gamma;
+            } else if (orientation === -90 || orientation === 270) { // 横持ち (右回転)
+                vecX = -beta;
+                vecY = gamma;
+            }
+
+            // 重力の強さを調整 (適度な感度にスケール)
+            const sensitivity = 0.2;
+            gravityX = vecX * sensitivity;
+            
+            // スマホを水平に持った状態(beta~0)ではなく、画面を立てた状態(beta~90)をベースにする場合は調整が必要ですが、
+            // 今回は単純に傾いた方向へ重力が働くようにします。
+            // 重力は下向きがマイナスなので反転
+            gravityY = -vecY * sensitivity; 
+        }
+
+        function updateBounds() {
+            const aspect = window.innerWidth / window.innerHeight;
+            const frustumSize = 10;
+            bounds.left = frustumSize * aspect / - 2;
+            bounds.right = frustumSize * aspect / 2;
+            bounds.bottom = frustumSize / - 2;
+            bounds.top = frustumSize / 2;
+        }
+
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            const frustumSize = 10;
+            camera.left = frustumSize * aspect / - 2;
+            camera.right = frustumSize * aspect / 2;
+            camera.top = frustumSize / 2;
+            camera.bottom = frustumSize / - 2;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            updateBounds();
+        }
+
         function animate() {
             requestAnimationFrame(animate);
 
-            // 1. 外力 (センサーから得た重力)
-            forceMat.uniforms.uGravity.value.set(gravityX, gravityY);
-            compute(forceMat);
+            const dt = 0.016; // 約60fpsのタイムステップ
+            const dummy = new THREE.Object3D();
+            const damping = 0.95; // 粘性（空気抵抗・摩擦）
+            const bounce = 0.5;   // 壁にぶつかった時の反発係数
 
-            // 2. 移流
-            compute(advectionMat);
+            // 物理演算の更新 (オイラー法)
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                let px = positions[i * 2];
+                let py = positions[i * 2 + 1];
+                let vx = velocities[i * 2];
+                let vy = velocities[i * 2 + 1];
 
-            // 3. 発散
-            compute(divergenceMat);
+                // 重力を適用
+                vx += gravityX * dt;
+                vy += gravityY * dt;
 
-            // 4. 圧力計算 (ヤコビ法) - 複数回回して精度を上げる
-            for (let i = 0; i < 20; i++) {
-                compute(jacobiMat);
+                // 速度に減衰（粘性）をかける
+                vx *= damping;
+                vy *= damping;
+
+                // 位置を更新
+                px += vx;
+                py += vy;
+
+                // 画面境界での衝突判定
+                if (px < bounds.left + PARTICLE_SIZE) {
+                    px = bounds.left + PARTICLE_SIZE;
+                    vx *= -bounce;
+                } else if (px > bounds.right - PARTICLE_SIZE) {
+                    px = bounds.right - PARTICLE_SIZE;
+                    vx *= -bounce;
+                }
+
+                if (py < bounds.bottom + PARTICLE_SIZE) {
+                    py = bounds.bottom + PARTICLE_SIZE;
+                    vy *= -bounce;
+                } else if (py > bounds.top - PARTICLE_SIZE) {
+                    py = bounds.top - PARTICLE_SIZE;
+                    vy *= -bounce;
+                }
+
+                // 状態を保存
+                positions[i * 2] = px;
+                positions[i * 2 + 1] = py;
+                velocities[i * 2] = vx;
+                velocities[i * 2 + 1] = vy;
+
+                // メッシュに位置を反映
+                dummy.position.set(px, py, 0);
+                dummy.updateMatrix();
+                instancedMesh.setMatrixAt(i, dummy.matrix);
             }
 
-            // 5. 勾配の減算 (非圧縮性の適用)
-            compute(gradientMat);
-
-            // 6. 画面へ描画
-            renderer.setRenderTarget(null); // デフォルトのキャンバスに戻す
-            displayMat.uniforms.uTex.value = rtRead.texture;
-            mesh.material = displayMat;
+            // 更新をThree.jsに通知
+            instancedMesh.instanceMatrix.needsUpdate = true;
             renderer.render(scene, camera);
         }
-
-        animate();
-
-        window.addEventListener('resize', () => {
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
     </script>
 </body>
 </html>
