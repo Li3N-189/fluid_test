@@ -1,131 +1,242 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Three.js Fluid Simulation with Gravity</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #000; }
-        canvas { display: block; }
-        #overlay {
-            position: absolute; top: 20px; left: 20px; color: white;
-            font-family: sans-serif; pointer-events: none;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Three.js Device Orientation Fluid</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #050510;
+      color: white;
+      font-family: sans-serif;
+    }
+    #ui {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 10;
+    }
+    button {
+      padding: 15px 30px;
+      font-size: 18px;
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      background-color: #007BFF;
+      color: white;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
-    <div id="overlay">端末を傾けてください</div>
-    <script type="importmap">
-        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
-    </script>
-    <script type="module">
-        import * as THREE from 'three';
 
-        // --- シミュレーション設定 ---
-        const RESOLUTION = 256;
-        let gravity = new THREE.Vector2(0, -9.8);
+  <div id="ui">
+    <button id="startButton">シミュレーション開始</button>
+  </div>
+  <div id="canvas-container"></div>
 
-        // --- Three.js 基本セットアップ ---
-        const scene = new THREE.Scene();
-        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        const renderer = new THREE.WebGLRenderer({ antialias: false });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
+  <script>
+    let scene, camera, renderer, particles;
+    let particleCount = 600; // スマホのCPU負荷を考慮した数
+    let positions, velocities;
+    
+    // 重力ベクトル（初期値は下向き）
+    let gravity = new THREE.Vector2(0, -980); 
+    
+    // 画面の境界
+    let bounds = { width: window.innerWidth, height: window.innerHeight };
 
-        // --- 流体計算用のレンダーターゲット ---
-        // 速度、密度などを保存するために2つのバッファを交互に入れ替えます（Ping-pong）
-        const createBuffer = () => new THREE.WebGLRenderTarget(RESOLUTION, RESOLUTION, {
-            type: THREE.FloatType,
-            format: THREE.RGBAFormat,
-            minFilter: THREE.LinearFilter,
-            magFilter: THREE.LinearFilter
-        });
+    function init() {
+      // 1. シーンとカメラのセットアップ（2Dなので平行投影カメラを使用）
+      scene = new THREE.Scene();
+      camera = new THREE.OrthographicCamera(
+        -bounds.width / 2, bounds.width / 2, 
+        bounds.height / 2, -bounds.height / 2, 
+        1, 1000
+      );
+      camera.position.z = 10;
 
-        let densityBuffer = createBuffer();
-        let densityBackBuffer = createBuffer();
+      renderer = new THREE.WebGLRenderer({ antialias: false });
+      renderer.setSize(bounds.width, bounds.height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-        // --- 簡易版フルイドシェーダー (密度更新 + 重力) ---
-        const fluidMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                tDiffuse: { value: null },
-                uGravity: { value: gravity },
-                uDeltaTime: { value: 0.016 },
-                uRes: { value: new THREE.Vector2(RESOLUTION, RESOLUTION) }
-            },
-            vertexShader: `
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: `
-                uniform sampler2D tDiffuse;
-                uniform vec2 uGravity;
-                uniform float uDeltaTime;
-                varying vec2 vUv;
+      // 2. 流体を表現するパーティクルの作成
+      const geometry = new THREE.BufferGeometry();
+      positions = new Float32Array(particleCount * 3);
+      velocities = [];
 
-                void main() {
-                    // 簡易的な移流と重力の影響
-                    // 本来はNavier-Stokes方程式に基づきますが、ここでは概念的な重力移動のみ
-                    vec2 offset = uGravity * uDeltaTime * 0.1;
-                    vec4 color = texture2D(tDiffuse, vUv - offset);
-                    
-                    // 減衰させて跡が残りすぎないようにする
-                    gl_FragColor = color * 0.99;
+      for (let i = 0; i < particleCount; i++) {
+        // 初期位置をランダムに配置
+        positions[i * 3] = (Math.random() - 0.5) * bounds.width * 0.5;
+        positions[i * 3 + 1] = (Math.random() - 0.5) * bounds.height * 0.5;
+        positions[i * 3 + 2] = 0;
 
-                    // 中央に常にエミッターを置く（デモ用）
-                    float dist = distance(vUv, vec2(0.5));
-                    if(dist < 0.05) gl_FragColor += vec4(0.5, 0.8, 1.0, 1.0);
-                }
-            `
-        });
+        velocities.push(new THREE.Vector2(0, 0));
+      }
 
-        // 描画用プレーン
-        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fluidMaterial);
-        scene.add(quad);
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
-        // --- 端末の傾きを取得 ---
-        window.addEventListener('deviceorientation', (event) => {
-            // beta: X軸（前後）、gamma: Y軸（左右）
-            const x = event.gamma / 90; // -1 to 1
-            const y = -event.beta / 90; // -1 to 1
-            gravity.set(x, y);
-        });
+      // パーティクルの見た目を滑らかにするテクスチャをCanvasで生成
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, 'rgba(100, 200, 255, 1)');
+      gradient.addColorStop(0.2, 'rgba(50, 150, 255, 0.8)');
+      gradient.addColorStop(1, 'rgba(0, 50, 255, 0)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 64, 64);
+      const texture = new THREE.CanvasTexture(canvas);
 
-        // iOS用の権限リクエスト（必要に応じてボタン等で実行）
-        window.addEventListener('click', () => {
-            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-                DeviceOrientationEvent.requestPermission();
-            }
-        });
+      // 加算合成を使用して流体のような「まとまり」を表現
+      const material = new THREE.PointsMaterial({
+        size: 40,
+        map: texture,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
 
-        // --- アニメーションループ ---
-        function animate() {
-            requestAnimationFrame(animate);
+      particles = new THREE.Points(geometry, material);
+      scene.add(particles);
 
-            // 計算ステップ
-            fluidMaterial.uniforms.tDiffuse.value = densityBackBuffer.texture;
-            fluidMaterial.uniforms.uGravity.value = gravity;
-            
-            renderer.setRenderTarget(densityBuffer);
-            renderer.render(scene, camera);
+      // リサイズイベント
+      window.addEventListener('resize', onWindowResize);
 
-            // 結果を画面に表示
-            renderer.setRenderTarget(null);
-            renderer.render(scene, camera);
+      // アニメーション開始
+      animate();
+    }
 
-            // バッファの入れ替え
-            let temp = densityBuffer;
-            densityBuffer = densityBackBuffer;
-            densityBackBuffer = temp;
+    function onWindowResize() {
+      bounds.width = window.innerWidth;
+      bounds.height = window.innerHeight;
+      camera.left = -bounds.width / 2;
+      camera.right = bounds.width / 2;
+      camera.top = bounds.height / 2;
+      camera.bottom = -bounds.height / 2;
+      camera.updateProjectionMatrix();
+      renderer.setSize(bounds.width, bounds.height);
+    }
+
+    // 3. 端末の傾きを取得する処理
+    function setupDeviceOrientation() {
+      window.addEventListener('deviceorientation', (event) => {
+        // gamma: 左右の傾き (-90 to 90)
+        // beta: 前後の傾き (-180 to 180)
+        
+        let tiltX = event.gamma;
+        let tiltY = event.beta;
+
+        // 画面の向き（縦持ち・横持ち）による補正
+        if (window.orientation === 90) {
+          tiltX = event.beta;
+          tiltY = -event.gamma;
+        } else if (window.orientation === -90) {
+          tiltX = -event.beta;
+          tiltY = event.gamma;
         }
 
-        animate();
+        // 傾きを重力ベクトルに変換（感度調整）
+        const gravityScale = 20.0;
+        gravity.x = tiltX * gravityScale;
+        gravity.y = -tiltY * gravityScale; 
+      });
+    }
 
-        window.addEventListener('resize', () => {
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-    </script>
+    // 4. 物理演算と描画のループ
+    const dt = 0.016; // 約60fpsのタイムステップ
+    const interactionRadius = 50; // 粒子同士が反発する距離
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const posAttribute = particles.geometry.attributes.position;
+      const posArray = posAttribute.array;
+
+      for (let i = 0; i < particleCount; i++) {
+        let vx = velocities[i].x;
+        let vy = velocities[i].y;
+        let px = posArray[i * 3];
+        let py = posArray[i * 3 + 1];
+
+        // 重力の適用
+        vx += gravity.x * dt;
+        vy += gravity.y * dt;
+
+        // 簡易的な流体表現（粒子同士の反発による体積維持）
+        // ※CPU負荷を抑えるため、ランダムな近傍粒子とのみ計算
+        for (let j = 0; j < 10; j++) {
+          let randomIdx = Math.floor(Math.random() * particleCount);
+          if (randomIdx === i) continue;
+          
+          let dx = px - posArray[randomIdx * 3];
+          let dy = py - posArray[randomIdx * 3 + 1];
+          let distSq = dx * dx + dy * dy;
+
+          if (distSq > 0 && distSq < interactionRadius * interactionRadius) {
+            let dist = Math.sqrt(distSq);
+            let force = (interactionRadius - dist) / interactionRadius;
+            vx += (dx / dist) * force * 100;
+            vy += (dy / dist) * force * 100;
+          }
+        }
+
+        // 粘性（減衰）の適用
+        vx *= 0.95;
+        vy *= 0.95;
+
+        // 位置の更新
+        px += vx * dt;
+        py += vy * dt;
+
+        // 画面境界でのバウンド処理
+        const halfW = bounds.width / 2;
+        const halfH = bounds.height / 2;
+        const padding = 10;
+
+        if (px < -halfW + padding) { px = -halfW + padding; vx *= -0.5; }
+        if (px > halfW - padding) { px = halfW - padding; vx *= -0.5; }
+        if (py < -halfH + padding) { py = -halfH + padding; vy *= -0.5; }
+        if (py > halfH - padding) { py = halfH - padding; vy *= -0.5; }
+
+        velocities[i].x = vx;
+        velocities[i].y = vy;
+        posArray[i * 3] = px;
+        posArray[i * 3 + 1] = py;
+      }
+
+      posAttribute.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+
+    // iOS 13+ のセンサー許可プロンプト対応
+    document.getElementById('startButton').addEventListener('click', () => {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              setupDeviceOrientation();
+              document.getElementById('ui').style.display = 'none';
+              init();
+            } else {
+              alert('センサーの利用が許可されませんでした。');
+            }
+          })
+          .catch(console.error);
+      } else {
+        // PCやiOS 13未満の端末用
+        setupDeviceOrientation();
+        document.getElementById('ui').style.display = 'none';
+        init();
+      }
+    });
+  </script>
 </body>
 </html>
