@@ -183,8 +183,8 @@
           if (distSq > 0 && distSq < interactionRadius * interactionRadius) {
             let dist = Math.sqrt(distSq);
             let force = (interactionRadius - dist) / interactionRadius;
-            vx += (dx / dist) * force * 100;
-            vy += (dy / dist) * force * 100;
+            vx += (dx / dist) * force;
+            vy += (dy / dist) * force;
           }
         }
 
