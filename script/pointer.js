@@ -15,8 +15,8 @@ export class PointerManager {
   onMouseMove(e) {
     this.prevX = this.x;
     this.prevY = this.y;
-    this.x = e.x / this.width;
-    this.y = -e.y / this.height + 1;
+    this.x = e.clientX / this.width;
+    this.y = -e.clientY / this.height + 1;
     this.isDragging = e.buttons % 2 == 1;
   }
   onMouseOut() {
@@ -27,8 +27,8 @@ export class PointerManager {
     this.prevX = this.x;
     this.prevY = this.y;
     const touch = e.touches[0];
-    this.x = touch.x / this.width;
-    this.y = -touch.y / this.height + 1;
+    this.x = touch.clientX / this.width;
+    this.y = -touch.clientY / this.height + 1;
     this.isDragging = true;
   }
   onTouchEnd() {
