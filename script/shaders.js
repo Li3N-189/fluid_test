@@ -1,9 +1,7 @@
 import * as THREE from 'three';
 import { Fn, If, abs, add, atan, clamp, div, dot, exp, float, floor, fract, instanceIndex, int, ivec2, length, max, mix, mul, select, storageTexture, textureLoad, textureStore, uvec2, vec2, vec3, vec4 } from 'three/tsl';
-import * as TSL from 'three/tsl';
-window.TSL = TSL;
 
-const applyReflectiveBoundary = Fn(([indexUV, screenSize, v, e = float(1.0)]) => {
+const applyReflectiveBoundary = Fn(([indexUV, screenSize, v, e = float(0.9)]) => {
   const vOut = v.toVar();
 
   If(indexUV.x.lessThanEqual(0).and(vOut.x.lessThan(0)), () => {
@@ -45,7 +43,7 @@ const sampleBilinear4 = Fn(([srcTex, uv, screenSize]) => {
   const c01 = textureLoad(srcTex, idxUV01);
   const c11 = textureLoad(srcTex, idxUV11);
   
-  const f = clamp(uv.sub(vec2(idxUV00).div(screenSize)), 0, 1);
+  const f = clamp(uv.mul(screenSize).sub(vec2(idxUV00)), 0, 1);
   const cx0 = mix(c00, c10, f.x);
   const cx1 = mix(c01, c11, f.x);
   return mix(cx0, cx1, f.y);
@@ -273,7 +271,7 @@ export const renderShader = Fn(([srcTex, dstTex, screenSize, timeStep]) => {
   const hue = tri.mul(1.0 / 6.0).add(timeStep.mul(0.0001));
   
   const speed = length(data.xy);
-  const sat = clamp(speed.mul(40.0), 0.3, 0.9);
+  const sat = clamp(speed.mul(30.0), 0.3, 0.9);
   const fragColor = vec4(hsv2rgb(hue, sat, 0.9), 1.0);
   
   textureStore(dstTex, indexUV, fragColor).toReadWrite();
