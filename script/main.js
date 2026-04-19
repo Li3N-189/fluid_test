@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { WebGPURenderer, MeshBasicNodeMaterial, StorageTexture } from 'three/webgpu';
 import { vec2, uvec2, uniform, storageTexture } from 'three/tsl';
 
-import { addForce, advectVelocity, updateDivergence, updatePressure, subtractGradient, renderShader } from '/script/shaders.js';
-import { PointerManager } from '/script/pointer.js';
+import { addForce, advectVelocity, updateDivergence, updatePressure, subtractGradient, renderShader } from './script/shaders.js';
+import { PointerManager } from './script/pointer.js';
 
 const width = 500, height = 500;
 
