@@ -14,7 +14,7 @@ const loader = new THREE.TextureLoader();
 
 const storageTextures = Array(3).fill().map(() => {
   const storageTexture = new StorageTexture(width, height);
-  storageTexture.type = THREE.FloatType;
+  storageTexture.type = THREE.HalfFloatType;
   return storageTexture;
 });
 
