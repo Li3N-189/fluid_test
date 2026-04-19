@@ -274,5 +274,5 @@ export const renderShader = Fn(([srcTex, dstTex, screenSize, timeStep]) => {
   const sat = clamp(speed.mul(30.0), 0.3, 0.9);
   const fragColor = vec4(hsv2rgb(hue, sat, 0.9), 1.0);
   
-  textureStore(dstTex, indexUV, fragColor).toReadWrite();
+  textureStore(dstTex, indexUV, fragColor);
 });
